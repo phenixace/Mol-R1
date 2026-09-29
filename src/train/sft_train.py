@@ -1,12 +1,12 @@
-"""SFT (Supervised Fine-Tuning) for molecular SMILES generation.
+"""Imitate operator: supervised fine-tuning on a trace set.
 
-Supports two modes:
-  - cot: Chain-of-Thought reasoning then answer
-  - gt:  Direct ground-truth SMILES generation
+Each example is one chat exchange in the format of src.common.chat_messages; the loss
+covers the response and its end-of-turn token, not the prompt. Two modes:
+  - cot: the response is the reasoning trace <think>...</think><answer>...</answer>
+  - gt:  the response is <answer>SMILES</answer> (direct supervision, no reasoning)
 """
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -26,13 +26,23 @@ if not hasattr(_dt, "DTensor"):
         _pu.DTensor = _FakeDTensor
 
 from datasets import Dataset
-from transformers import AutoTokenizer, AutoModelForCausalLM
-from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM
+from transformers import (AutoModelForCausalLM, AutoTokenizer, DataCollatorForSeq2Seq, Trainer,
+                          TrainingArguments)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from src.common import COT_PREFIX as COT_PROMPT, GT_PROMPT, parse_entry
+from src.common import chat_example, load_json, parse_entry
 
-DEFAULT_MODEL_NAME = "facebook/galactica-125m"
+DEFAULT_MODEL_NAME = "meta-llama/Llama-3.1-8B-Instruct"
+
+
+def tokenize(tokenizer, question, response, max_seq_len):
+    """Input ids of prompt + response, with the prompt masked out of the labels."""
+    prompt, target = chat_example(tokenizer, question, response)
+    prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+    target_ids = tokenizer(target, add_special_tokens=False)["input_ids"]
+    input_ids = (prompt_ids + target_ids)[:max_seq_len]
+    labels = ([-100] * len(prompt_ids) + target_ids)[:max_seq_len]
+    return {"input_ids": input_ids, "attention_mask": [1] * len(input_ids), "labels": labels}
 
 
 def main():
@@ -52,30 +62,15 @@ def main():
         args.output_dir = f"sft_output_{args.mode}"
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    is_galactica = "galactica" in args.model_name.lower()
-    if is_galactica:
-        tokenizer.pad_token_id = 1
-        tokenizer.eos_token_id = 2
-    else:
-        if tokenizer.pad_token_id is None:
-            tokenizer.pad_token = tokenizer.eos_token
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
 
-    with open(args.data_path, "r", encoding="utf-8") as f:
-        raw_data = json.load(f)
-
-    parsed = [parse_entry(d) for d in raw_data]
-    if args.mode == "cot":
-        texts = [COT_PROMPT.format(question=q) + content for q, gt, content in parsed]
-        response_template = "\n\n<think>"
-    else:
-        texts = [
-            GT_PROMPT.format(question=q) + gt + "[END_I_SMILES]"
-            for q, gt, content in parsed
-        ]
-        response_template = "[START_I_SMILES]"
-
-    dataset = Dataset.from_dict({"text": texts})
+    examples = []
+    for question, gt, content in map(parse_entry, load_json(args.data_path)):
+        response = content if args.mode == "cot" else f"<answer>\n{gt}\n</answer>"
+        examples.append(tokenize(tokenizer, question, response, args.max_seq_len))
+    dataset = Dataset.from_list(examples)
 
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name, torch_dtype=torch.bfloat16
@@ -83,13 +78,7 @@ def main():
     model.config.pad_token_id = tokenizer.pad_token_id
     model.config.eos_token_id = tokenizer.eos_token_id
 
-    response_template_ids = tokenizer.encode(response_template, add_special_tokens=False)
-    collator = DataCollatorForCompletionOnlyLM(
-        response_template=response_template_ids,
-        tokenizer=tokenizer,
-    )
-
-    training_args = SFTConfig(
+    training_args = TrainingArguments(
         output_dir=args.output_dir,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.batch_size,
@@ -105,15 +94,13 @@ def main():
         ddp_find_unused_parameters=False,
         report_to="none",
         gradient_checkpointing=True,
-        max_seq_length=args.max_seq_len,
     )
 
-    trainer = SFTTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=dataset,
-        processing_class=tokenizer,
-        data_collator=collator,
+        data_collator=DataCollatorForSeq2Seq(tokenizer, padding=True, label_pad_token_id=-100),
     )
 
     trainer.train()

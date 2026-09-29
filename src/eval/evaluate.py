@@ -1,4 +1,10 @@
-"""Evaluate SMILES predictions against ground truth using standard molecular translation metrics."""
+"""Evaluate SMILES predictions against ground truth with the metrics of MolT5.
+
+Predictions are the last <answer> block of each output (src/eval/predict.py); outputs
+without one are empty. Exact match compares InChI; an empty or unparsable prediction
+counts as invalid; fingerprint similarities average over valid predictions; BLEU and
+Levenshtein distance are computed on characters over all predictions.
+"""
 
 import argparse
 import csv
@@ -51,7 +57,7 @@ def evaluate(gts, preds, morgan_r=2):
         levs.append(lev(pred, gt))
         try:
             m_gt = Chem.MolFromSmiles(gt)
-            m_pred = Chem.MolFromSmiles(pred)
+            m_pred = Chem.MolFromSmiles(pred) if pred else None  # RDKit parses "" as an empty molecule
             if m_pred is None or m_gt is None:
                 raise ValueError("Invalid SMILES")
             if same_molecule(pred, gt):

@@ -25,7 +25,11 @@ stop when Rᵀ⁺¹ covers the training set, stops growing, or after the maximum
 | Explore | `src/train/grpo_train.py` | GRPO on the full training set with an exact-match reward. A SMILES-validity reward is available but off by default. |
 | Harvest | `src/rsi/harvest.py` | The RL policy samples up to 8 traces for every training instance. A trace is accepted if it is well-formed and its answer is the reference molecule. Accepted traces replace those of the same instances in Rᵀ; instances the policy fails to re-solve keep their previous trace. |
 | Verifier | `src/common.py` | One definition of correctness, identical InChI, shared by the reward, the harvest step and evaluation. The reported run compared RDKit canonical SMILES in the reward; every released harvested trace also matches by InChI. |
-| Statistics | `src/rsi/stats.py` | Coverage, churn (instances gained, and instances of Rᵀ the new policy fails to re-solve) and harvest difficulty. The loop logs them for every iteration. |
+| Statistics | `src/rsi/stats.py` | Coverage, churn (instances gained, and instances of Rᵀ the new policy fails to re-solve), harvest difficulty, and the pass@k of the harvesting policy on the training set. The loop logs them for every iteration. |
+
+## Prompt Format
+
+Every stage (SFT, GRPO, harvest and evaluation) prompts the model the same way: one user turn, `{description} Please help me generate a molecule SMILES based on the above description.`, rendered with the model's chat template and no system message (`chat_prompt` in `src/common.py`). The model responds with `<think>…</think>\n<answer>SMILES</answer>`. SFT trains on the response and its end-of-turn token only. `T0.json` stores its examples in this format.
 
 ## Project Structure
 
@@ -50,6 +54,7 @@ Mol-R1/
 │   └── eval/                   # predict.py, evaluate.py
 ├── scripts/
 │   ├── run_rsi.sh              # full loop
+│   ├── run_harvest.sh          # harvest with a trained policy on all GPUs
 │   ├── run_sft_eval.sh         # SFT + eval on one trace set
 │   ├── run_sft_rpo.sh          # one iteration without harvest
 │   └── run_prid.sh             # regenerate the seed
@@ -107,6 +112,8 @@ python src/rsi/stats.py --train_data data/raw/chebi-20/train.txt \
     data/MoIA/T0.json data/MoIA/T1.json data/MoIA/T2.json
 ```
 
+For a harvest, the statistics include pass@k of the harvesting policy on the training set: the share of instances whose first verified sample is among the first k.
+
 ### Single stages
 
 ```bash
@@ -116,12 +123,12 @@ bash scripts/run_sft_eval.sh MoIA-T0 meta-llama/Llama-3.1-8B-Instruct 2
 # SFT on a trace set, GRPO on the training set, then evaluate
 bash scripts/run_sft_rpo.sh MoIA-T0 meta-llama/Llama-3.1-8B-Instruct 2 8
 
-# Harvest with a trained policy (one shard; the loop runs one shard per GPU)
-python src/rsi/harvest.py --model_dir outputs/rsi/iter_0/rl/final \
-    --train_data data/raw/chebi-20/train.txt --output_dir outputs/harvest
+# Harvest with a trained policy: up to 8 samples per training instance, one shard per GPU on 8 GPUs;
+# writes outputs/harvest/harvest.json and prints coverage and pass@k
+bash scripts/run_harvest.sh outputs/rsi/iter_0/rl/final outputs/harvest 8 8
 
 # Evaluate a checkpoint; --save_generations also keeps the full reasoning traces
-torchrun --nproc_per_node=8 src/eval/predict.py --mode cot \
+torchrun --nproc_per_node=8 src/eval/predict.py \
     --model_dir outputs/rsi/iter_2/rl/final --test_path data/raw/chebi-20/test.txt \
     --output_path outputs/predictions.txt --save_generations outputs/generations.jsonl
 python src/eval/evaluate.py outputs/predictions.txt
@@ -165,8 +172,8 @@ bash scripts/run_prid.sh gpt-4o "" $OPENAI_API_KEY
 |-----------|-------|
 | max_attempts | 8 (the released T1/T2 used 64) |
 | samples_per_round | 8 |
-| temperature | 1.0 |
-| top_p | 1.0 |
+| temperature | 0.6 (as inference) |
+| top_p | 0.9 (as inference) |
 | max_tokens | 4096 |
 
 ### Inference
@@ -178,16 +185,19 @@ bash scripts/run_prid.sh gpt-4o "" $OPENAI_API_KEY
 
 ## Evaluation Metrics
 
+The prediction is the content of the last `<answer>…</answer>` block of the output, with whitespace removed; an output without one counts as incorrect and invalid.
+
 - **Exact Match**: InChI-based exact match rate
-- **BLEU**: Character-level BLEU score
-- **Levenshtein**: Edit distance
-- **Validity**: RDKit molecular validity rate
-- **MACCS/RDK/Morgan FTS**: Fingerprint Tanimoto similarity
+- **BLEU**: Character-level BLEU score over all outputs
+- **Levenshtein**: Character edit distance over all outputs
+- **Validity**: share of predictions RDKit parses; an empty prediction is invalid
+- **MACCS/RDK/Morgan FTS**: Fingerprint Tanimoto similarity, averaged over valid predictions
 
 ## Changes from the Initial Release
 
 - The loop is self-sampling end to end. The harvest step keeps the policy's own reasoning trace, samples up to K times per instance, and merges the new traces with the previous trace set. No teacher model is queried after the seed.
 - RL runs on the full training set with an exact-match reward only. Exact match uses InChI identity, matching the harvest step and evaluation.
+- All stages use the chat-format prompt of the seed `T0.json` (see Prompt Format). Evaluation reads the last `<answer>` block and counts an empty prediction as invalid.
 - Removed `data/PRID-G/`, `data/RS-G/`, `data/PRID-4o/` and the teacher rejection-sampling baseline. The Chinese seed is now `data/MoIA/T0_zh.json`, and `data/MoIA/T0.json` holds the English translation the run was trained on.
 
 ## Citation

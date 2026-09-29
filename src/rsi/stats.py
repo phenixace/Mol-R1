@@ -5,6 +5,11 @@
 
 Entries without an "id" (the conversation-format seed) are matched to training
 ids by description and reference molecule.
+
+For a harvest, pass@k of the sampling policy on the training set is the share of
+instances whose first verified sample is among the first k (failure_times < k);
+samples are independent, so this estimates pass@k for every k up to the budget.
+Traces carried over from an earlier set are left out.
 """
 
 import argparse
@@ -55,6 +60,16 @@ def summarize(entries, ids, universe_size):
             "mean_failure_times": statistics.mean(ft),
             "max_failure_times": max(ft),
         })
+    first_success = {}
+    for d, i in zip(entries, ids):
+        if i is not None and "failure_times" in d and not d.get("from_previous"):
+            first_success[i] = min(d["failure_times"], first_success.get(i, d["failure_times"]))
+    if first_success:
+        budget = 1
+        while budget <= max(first_success.values()):
+            budget *= 2
+        out["pass_at_k"] = {k: sum(1 for f in first_success.values() if f < k) / universe_size
+                            for k in (2 ** j for j in range(budget.bit_length()))}
     return out, unique
 
 
@@ -92,6 +107,8 @@ def main():
         print(f"{r['iteration']:>2} {r['rows']:>6} {r['unique_ids']:>6} {r['coverage']:>6.1%} "
               f"{cell('new', 6)} {cell('lost', 5)} {cell('retained', 6)} "
               f"{cell('first_try_rate', 7, '.1%')} {cell('mean_failure_times', 7, '.2f')} {r['mean_trace_chars']:>6.0f}")
+        if r.get("pass_at_k"):
+            print("   pass@k: " + "  ".join(f"{k}: {v:.1%}" for k, v in r["pass_at_k"].items()))
         if r["unresolved_rows"]:
             print(f"   ({r['unresolved_rows']} rows could not be matched to a training id)")
     if args.json_out:

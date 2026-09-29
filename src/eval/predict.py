@@ -1,5 +1,10 @@
+"""Generate test-set predictions with a trained checkpoint (one data shard per GPU under torchrun).
+
+Prompts use the chat format of src.common.chat_prompt, as in training; the prediction is
+the last <answer> block of each output (src.common.extract_answer).
+"""
+
 import argparse
-import csv
 import json
 import os
 import sys
@@ -11,14 +16,13 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from src.common import GEN_PROMPT as COT_PROMPT, GT_PROMPT, clean_smiles, extract_answer, same_molecule
+from src.common import chat_prompt, extract_answer, load_tsv, same_molecule
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["cot", "gt"], required=True)
-    parser.add_argument("--model_dir", type=str, default=None)
-    parser.add_argument("--output_path", type=str, default=None)
+    parser.add_argument("--model_dir", type=str, required=True)
+    parser.add_argument("--output_path", type=str, default="predictions.txt")
     parser.add_argument("--test_path", type=str, default="data/raw/chebi-20/test.txt")
     parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--temperature", type=float, default=0.6)
@@ -27,11 +31,6 @@ def main():
     parser.add_argument("--save_generations", type=str, default=None,
                         help="Also write full generations (JSONL) to this path")
     args = parser.parse_args()
-
-    if args.model_dir is None:
-        args.model_dir = f"sft_output_{args.mode}/final"
-    if args.output_path is None:
-        args.output_path = f"predictions_{args.mode}.txt"
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     world_size = int(os.environ.get("WORLD_SIZE", 1))
@@ -43,13 +42,8 @@ def main():
     torch.cuda.set_device(device)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
-    is_galactica = "galactica" in args.model_dir.lower()
-    if is_galactica:
-        tokenizer.pad_token_id = 1
-        tokenizer.eos_token_id = 2
-    else:
-        if tokenizer.pad_token_id is None:
-            tokenizer.pad_token = tokenizer.eos_token
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
 
     model = AutoModelForCausalLM.from_pretrained(
@@ -58,24 +52,10 @@ def main():
     ).to(device)
     model.eval()
 
-    if args.mode == "cot":
-        prompt_tpl = COT_PROMPT
-        max_new = args.max_tokens
-        extract_fn = extract_answer
-    else:
-        prompt_tpl = GT_PROMPT
-        max_new = 256
-        extract_fn = clean_smiles
-        end_token_id = tokenizer.encode("[END_I_SMILES]", add_special_tokens=False)[0]
-
-    all_cids, all_gt, all_prompts = [], [], []
-    with open(args.test_path, "r", encoding="utf-8") as f:
-        reader = csv.reader(f, delimiter="\t")
-        next(reader)
-        for row in reader:
-            all_cids.append(row[0])
-            all_gt.append(row[1])
-            all_prompts.append(prompt_tpl.format(question=row[2]))
+    items = load_tsv(args.test_path)
+    all_cids = [it["id"] for it in items]
+    all_gt = [it["gt"] for it in items]
+    all_prompts = [chat_prompt(tokenizer, it["question"]) for it in items]
 
     # Shard data across GPUs
     my_indices = list(range(local_rank, len(all_prompts), world_size))
@@ -89,18 +69,16 @@ def main():
 
     for i in pbar:
         batch = my_prompts[i:i + args.batch_size]
-        inputs = tokenizer(
-            batch, return_tensors="pt", padding=True, truncation=True, max_length=512,
-        ).to(device)
+        # the chat template already contains the BOS token
+        inputs = tokenizer(batch, return_tensors="pt", padding=True, add_special_tokens=False).to(device)
         inputs.pop("token_type_ids", None)
 
         with torch.no_grad():
-            eos_ids = [end_token_id, tokenizer.eos_token_id] if args.mode == "gt" else [tokenizer.eos_token_id]
             do_sample = args.temperature > 0
             gen_kwargs = dict(
                 **inputs,
-                max_new_tokens=max_new,
-                eos_token_id=eos_ids,
+                max_new_tokens=args.max_tokens,
+                eos_token_id=tokenizer.eos_token_id,
                 pad_token_id=tokenizer.pad_token_id,
             )
             if do_sample:
@@ -114,7 +92,7 @@ def main():
             gen_ids = output[input_len:]
             gen_ids = gen_ids[(gen_ids != tokenizer.pad_token_id)]
             generated = tokenizer.decode(gen_ids, skip_special_tokens=False)
-            my_predictions.append(extract_fn(generated))
+            my_predictions.append(extract_answer(generated))
             my_generations.append(generated)
 
     # Gather results from all GPUs
@@ -151,8 +129,8 @@ def main():
 
         exact = sum(1 for g, p in zip(final_gt, final_preds) if same_molecule(p, g))
         total = len(final_preds)
-        print(f"\n[{args.mode.upper()}] Predictions saved to {args.output_path}")
-        print(f"[{args.mode.upper()}] Total: {total}, Exact match: {exact}/{total} = {exact/total*100:.2f}%")
+        print(f"\nPredictions saved to {args.output_path}")
+        print(f"Total: {total}, Exact match: {exact}/{total} = {exact/total*100:.2f}%")
 
     if world_size > 1:
         dist.destroy_process_group()

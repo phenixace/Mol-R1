@@ -1,9 +1,10 @@
 """Explore operator: GRPO on top of the SFT policy.
 
-Prompts come from the raw training split (TSV) or a trace set (JSON). The reward
-is exact match: InChI identity with the reference, the same verifier used by the
-harvest step and evaluation. A SMILES-validity reward can be added with
---validity_weight (off by default).
+Prompts come from the raw training split (TSV) or a trace set (JSON), in the chat
+format of src.common.chat_prompt. The reward is the verifier shared with the harvest
+step: 1 if the completion is <think>...</think><answer>...</answer> and the answer is
+the reference molecule (InChI identity), else 0. A SMILES-validity reward can be
+added with --validity_weight (off by default).
 """
 
 import os
@@ -29,7 +30,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from trl import GRPOTrainer, GRPOConfig
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from src.common import GEN_PROMPT, extract_answer, is_valid_smiles, load_items, same_molecule
+from src.common import chat_prompt, extract_answer, is_valid_smiles, load_items, verify
 
 _orig_get_train_sampler = GRPOTrainer._get_train_sampler
 def _patched_get_train_sampler(self, dataset=None):
@@ -37,7 +38,7 @@ def _patched_get_train_sampler(self, dataset=None):
 GRPOTrainer._get_train_sampler = _patched_get_train_sampler
 
 def exact_match_reward(prompts, completions, gt, **kwargs):
-    return [1.0 if same_molecule(extract_answer(c), g) else 0.0 for c, g in zip(completions, gt)]
+    return [1.0 if verify(c, g)[0] else 0.0 for c, g in zip(completions, gt)]
 
 
 def validity_reward(prompts, completions, **kwargs):
@@ -63,21 +64,16 @@ def main():
     parser.add_argument("--validity_weight", type=float, default=0.0)
     args = parser.parse_args()
 
+    tokenizer = AutoTokenizer.from_pretrained(args.sft_model_dir)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+
     items = load_items(args.data_path)
     dataset = Dataset.from_dict({
-        "prompt": [GEN_PROMPT.format(question=it["question"]) for it in items],
+        "prompt": [chat_prompt(tokenizer, it["question"]) for it in items],
         "gt": [it["gt"] for it in items],
     })
-
-    tokenizer = AutoTokenizer.from_pretrained(args.sft_model_dir)
-    is_galactica = "galactica" in args.sft_model_dir.lower()
-    if is_galactica:
-        tokenizer.pad_token_id = 1
-        tokenizer.eos_token_id = 2
-    else:
-        if tokenizer.pad_token_id is None:
-            tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "left"
 
     rewards = [(f, w) for f, w in ((exact_match_reward, args.em_weight),
                                    (validity_reward, args.validity_weight)) if w > 0]

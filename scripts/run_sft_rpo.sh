@@ -6,7 +6,7 @@
 set -e
 
 DATA_NAME=${1:-"MoIA-T0"}
-MODEL=${2:-"facebook/galactica-125m"}
+MODEL=${2:-"meta-llama/Llama-3.1-8B-Instruct"}
 NUM_GPUS=${3:-2}
 RPO_GPUS=${4:-8}
 
@@ -57,7 +57,6 @@ torchrun --nproc_per_node=$RPO_GPUS src/train/grpo_train.py \
 
 # Step 3: Predict
 torchrun --nproc_per_node=$RPO_GPUS src/eval/predict.py \
-    --mode cot \
     --model_dir $RPO_DIR/final \
     --test_path data/raw/chebi-20/test.txt \
     --output_path $RPO_DIR/predictions.txt \

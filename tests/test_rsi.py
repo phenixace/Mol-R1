@@ -12,10 +12,22 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.common import GEN_PROMPT, dump_json, load_json, verify
+from src.common import (INSTRUCTION, chat_example, chat_messages, chat_prompt, dump_json,
+                        extract_answer, load_json, parse_entry, verify)
 from src.rsi.harvest import harvest, merge_shards, shard_paths
 from src.rsi.loop import merge_previous
 from src.rsi.stats import compare, resolve_ids, summarize
+
+
+class Llama3LikeTokenizer:
+    """Renders chats like the Llama 3 template, without its default system message."""
+
+    def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=False):
+        assert not tokenize
+        text = "<|begin_of_text|>" + "".join(
+            f"<|start_header_id|>{m['role']}<|end_header_id|>\n\n{m['content'].strip()}<|eot_id|>"
+            for m in messages)
+        return text + ("<|start_header_id|>assistant<|end_header_id|>\n\n" if add_generation_prompt else "")
 
 
 class FakeSampler:
@@ -26,19 +38,43 @@ class FakeSampler:
         self.attempts = collections.Counter()
         self.calls = []
 
-    def __call__(self, prompts, n):
-        self.calls.append((len(prompts), n))
+    def __call__(self, questions, n):
+        self.calls.append((len(questions), n))
         out = []
-        for p in prompts:
-            q = p.split("Description: ")[1].split("\n\n")[0]
+        for q in questions:
             comps = []
             for _ in range(n):
                 k = self.attempts[q]
                 self.attempts[q] += 1
                 smiles = self.answers[q] if self.plan[q] == k else "C"
-                comps.append(f"\nstep {k}\n</think>\n<answer>\n{smiles}\n</answer>")
+                comps.append(f"<think>\nstep {k}\n</think>\n<answer>\n{smiles}\n</answer>")
             out.append(comps)
         return out
+
+
+class TestPromptFormat(unittest.TestCase):
+    def test_single_user_turn_without_system_message(self):
+        self.assertEqual(chat_messages("desc"), [{"role": "user", "content": "desc" + INSTRUCTION}])
+        self.assertEqual(chat_prompt(Llama3LikeTokenizer(), "desc"),
+                         "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
+                         "desc Please help me generate a molecule SMILES based on the above description."
+                         "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n")
+
+    def test_sft_prompt_is_the_generation_prompt(self):
+        tok, trace = Llama3LikeTokenizer(), "<think>r</think>\n<answer>\nCCO\n</answer>"
+        prompt, target = chat_example(tok, "desc", trace)
+        self.assertEqual(prompt, chat_prompt(tok, "desc"))
+        self.assertEqual(target, trace + "<|eot_id|>")
+
+    def test_seed_user_turn_round_trips(self):
+        trace = {"from": "gpt", "value": "<think>r</think>\n<answer>\nCCO\n</answer>"}
+        seed = {"conversations": [{"from": "human", "value": "Ethanol." + INSTRUCTION}, trace]}
+        question, gt, _ = parse_entry(seed)
+        self.assertEqual((question, gt), ("Ethanol.", "CCO"))
+        self.assertEqual(chat_messages(question)[0]["content"], seed["conversations"][0]["value"])
+        # one seed entry lacks the space before the instruction
+        glued = {"conversations": [{"from": "human", "value": "Ethanol" + INSTRUCTION.lstrip()}, trace]}
+        self.assertEqual(parse_entry(glued)[0], "Ethanol")
 
 
 class TestVerify(unittest.TestCase):
@@ -55,6 +91,11 @@ class TestVerify(unittest.TestCase):
 
     def test_unparsable_reference_never_matches(self):
         self.assertFalse(verify("<think>x</think><answer>C1CC</answer>", "C1CC")[0])
+
+    def test_prediction_is_last_answer_block_without_whitespace(self):
+        self.assertEqual(extract_answer("<answer>\nreasoning\n</answer>\n<answer>\nC C\nO\n</answer>"), "CCO")
+        self.assertEqual(extract_answer("<think>no answer block</think> CCO"), "")
+        self.assertEqual(verify("<think>x</think> CCO", "CCO", require_format=False), (False, None))
 
 
 class TestHarvest(unittest.TestCase):
@@ -77,13 +118,13 @@ class TestHarvest(unittest.TestCase):
         self.assertEqual(meta["samples_generated"], 3 * 8 + 2 * 8 + 1 * 4)
         self.assertEqual((meta["accepted"], meta["unresolved"], meta["rounds"]), (2, 1, 3))
 
-    def test_prompt_matches_training_format(self):
+    def test_sampler_gets_descriptions_and_trace_is_the_response(self):
         seen = []
-        harvest([{"id": "a", "question": "q", "gt": "C"}],
-                lambda prompts, n: seen.extend(prompts) or [["</think><answer>C</answer>"] * n],
-                max_attempts=1, samples_per_round=1, log=lambda *_: None)
-        self.assertEqual(seen, [GEN_PROMPT.format(question="q")])
-        self.assertTrue(seen[0].endswith("\n\n<think>"))
+        entries, _ = harvest([{"id": "a", "question": "q", "gt": "C"}],
+                             lambda questions, n: seen.extend(questions) or [["<think>r</think><answer>C</answer>"] * n],
+                             max_attempts=1, samples_per_round=1, log=lambda *_: None)
+        self.assertEqual(seen, ["q"])
+        self.assertEqual(entries[0]["content"], "<think>r</think><answer>C</answer>")
 
     def test_merge_shards_keeps_training_order(self):
         items = [{"id": i} for i in ("x", "y", "z")]
@@ -112,6 +153,13 @@ class TestStats(unittest.TestCase):
                                                  {"from": "gpt", "value": f"<think></think><answer>{smi}</answer>"}]}
         entries = [conv("same text", "NCC"), conv("unique", "C"), {"id": 99}, conv("missing", "C")]
         self.assertEqual(resolve_ids(entries, train), ["11", "12", "99", None])
+
+    def test_pass_at_k_from_harvest(self):
+        # first success after 0, 0, 3 and 5 failed samples; 10 instances; budget 8
+        entries = [{"id": str(i), "content": "", "failure_times": f} for i, f in enumerate([0, 0, 3, 5])]
+        entries.append({"id": "9", "content": "", "failure_times": 0, "from_previous": True})
+        summary, _ = summarize(entries, [e["id"] for e in entries], universe_size=10)
+        self.assertEqual(summary["pass_at_k"], {1: 0.2, 2: 0.2, 4: 0.3, 8: 0.4})
 
     def test_summarize_counts_duplicates(self):
         entries = [{"id": "1", "content": "ab", "failure_times": 0},

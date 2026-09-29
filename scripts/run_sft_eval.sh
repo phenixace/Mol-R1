@@ -6,7 +6,7 @@
 set -e
 
 DATA_NAME=${1:-"MoIA-T0"}
-MODEL=${2:-"facebook/galactica-125m"}
+MODEL=${2:-"meta-llama/Llama-3.1-8B-Instruct"}
 NUM_GPUS=${3:-2}
 
 case $DATA_NAME in
@@ -41,7 +41,6 @@ torchrun --nproc_per_node=$NUM_GPUS src/train/sft_train.py \
 
 # Step 2: Prediction
 torchrun --nproc_per_node=$NUM_GPUS src/eval/predict.py \
-    --mode cot \
     --model_dir $OUTPUT_DIR/final \
     --test_path data/raw/chebi-20/test.txt \
     --output_path $OUTPUT_DIR/predictions.txt \

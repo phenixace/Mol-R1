@@ -95,7 +95,7 @@ def run_eval(args, model_dir, prefix):
     if not metrics.exists():
         pred = f"{prefix}_predictions.txt"
         run(torchrun(args.eval_gpus) + [
-            PREDICT, "--mode", "cot", "--model_dir", model_dir, "--test_path", args.eval_data,
+            PREDICT, "--model_dir", model_dir, "--test_path", args.eval_data,
             "--output_path", pred, "--temperature", args.eval_temperature,
             "--top_p", args.eval_top_p, "--max_tokens", args.eval_max_tokens,
         ], f"Evaluate {model_dir}")
@@ -166,8 +166,8 @@ def parse_args():
     g.add_argument("--harvest_gpus_per_shard", type=int, default=1)
     g.add_argument("--harvest_max_attempts", type=int, default=8)
     g.add_argument("--harvest_samples_per_round", type=int, default=8)
-    g.add_argument("--harvest_temperature", type=float, default=1.0)
-    g.add_argument("--harvest_top_p", type=float, default=1.0)
+    g.add_argument("--harvest_temperature", type=float, default=0.6)
+    g.add_argument("--harvest_top_p", type=float, default=0.9)
     g.add_argument("--harvest_max_tokens", type=int, default=4096)
     g.add_argument("--no_require_format", action="store_true")
 
