@@ -19,7 +19,7 @@ shift $(( $# < 3 ? $# : 3 ))
 
 python src/rsi/loop.py \
     --base_model "$BASE_MODEL" \
-    --seed_data data/MoIA/T0_zh.json \
+    --seed_data data/MoIA/T0.json \
     --train_data data/raw/chebi-20/train.txt \
     --work_dir "$WORK_DIR" \
     --max_iterations "$MAX_ITER" \

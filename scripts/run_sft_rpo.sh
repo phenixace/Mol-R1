@@ -11,7 +11,8 @@ NUM_GPUS=${3:-2}
 RPO_GPUS=${4:-8}
 
 case $DATA_NAME in
-    "MoIA-T0")  DATA_PATH="data/MoIA/T0_zh.json" ;;
+    "MoIA-T0")  DATA_PATH="data/MoIA/T0.json" ;;
+    "MoIA-T0-zh") DATA_PATH="data/MoIA/T0_zh.json" ;;
     "MoIA-T1")  DATA_PATH="data/MoIA/T1.json" ;;
     "MoIA-T2")  DATA_PATH="data/MoIA/T2.json" ;;
     *)          DATA_PATH=$DATA_NAME ;;

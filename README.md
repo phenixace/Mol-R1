@@ -34,7 +34,8 @@ Mol-R1/
 ├── data/
 │   ├── raw/chebi-20/           # train (26,407) / validation (3,301) / test (3,300)
 │   └── MoIA/                   # trace sets of the released run
-│       ├── T0_zh.json          # R⁰: PRID seed (Chinese original)
+│       ├── T0.json             # R⁰: PRID seed, English (used for training)
+│       ├── T0_zh.json          # R⁰: the teacher's original output, in Chinese
 │       ├── T1.json             # R¹: harvested by the T=0 policy
 │       └── T2.json             # R²: harvested by the T=1 policy
 ├── src/
@@ -61,11 +62,12 @@ ChEBI-20 splits are TSV files: `CID \t SMILES \t description`.
 
 | File | Set | Produced by | Rows | Unique IDs |
 |------|-----|-------------|-----:|-----------:|
-| `T0_zh.json` | R⁰ | PRID seed (GPT-4o) | 1,054 | — |
+| `T0.json` | R⁰ | PRID seed (GPT-4o), English translation used for training | 1,054 | — |
+| `T0_zh.json` | R⁰ | the teacher's original output, in Chinese | 1,054 | — |
 | `T1.json` | R¹ | Harvest with the T=0 policy | 7,285 | 7,285 |
 | `T2.json` | R² | Harvest with the T=1 policy | 8,946 | 8,700 |
 
-- `T0_zh.json` is the seed as generated, in the conversation format `{"conversations": [{"from": "human", …}, {"from": "gpt", "value": "<think>…</think>\n<answer>…</answer>"}]}`. Its reasoning traces are in Chinese (1,030 of 1,054); the released run was trained on an English translation of this file.
+- `T0.json` and `T0_zh.json` use the conversation format `{"conversations": [{"from": "human", …}, {"from": "gpt", "value": "<think>…</think>\n<answer>…</answer>"}]}`. The teacher wrote its traces in Chinese (`T0_zh.json`); the released run was trained on their English translation (`T0.json`).
 - `T1.json` and `T2.json` use the harvest schema: `id` (ChEBI CID), `question`, `gt` (reference SMILES), `content` (full reasoning trace), `pred` (answer SMILES), `score` (always 1), and `failure_times` (number of failed samples before the accepted one). Each file holds the traces harvested in that iteration, with up to 64 attempts per instance; the loop in this repository merges each harvest with the previous trace set.
 - In `T2.json`, 246 instances have two accepted traces. The loop in this repository keeps one trace per instance.
 
@@ -102,7 +104,7 @@ outputs/rsi/
 
 ```bash
 python src/rsi/stats.py --train_data data/raw/chebi-20/train.txt \
-    data/MoIA/T0_zh.json data/MoIA/T1.json data/MoIA/T2.json
+    data/MoIA/T0.json data/MoIA/T1.json data/MoIA/T2.json
 ```
 
 ### Single stages
@@ -186,7 +188,7 @@ bash scripts/run_prid.sh gpt-4o "" $OPENAI_API_KEY
 
 - The loop is self-sampling end to end. The harvest step keeps the policy's own reasoning trace, samples up to K times per instance, and merges the new traces with the previous trace set. No teacher model is queried after the seed.
 - RL runs on the full training set with an exact-match reward only. Exact match uses InChI identity, matching the harvest step and evaluation.
-- Removed `data/PRID-G/`, `data/RS-G/`, `data/PRID-4o/` and the teacher rejection-sampling baseline. Renamed the seed to `data/MoIA/T0_zh.json`.
+- Removed `data/PRID-G/`, `data/RS-G/`, `data/PRID-4o/` and the teacher rejection-sampling baseline. The Chinese seed is now `data/MoIA/T0_zh.json`, and `data/MoIA/T0.json` holds the English translation the run was trained on.
 
 ## Citation
 

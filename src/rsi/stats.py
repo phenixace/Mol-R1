@@ -1,7 +1,7 @@
 """Statistics of a self-improvement run: coverage, churn and harvest difficulty.
 
     python src/rsi/stats.py --train_data data/raw/chebi-20/train.txt \
-        data/MoIA/T0_zh.json data/MoIA/T1.json data/MoIA/T2.json
+        data/MoIA/T0.json data/MoIA/T1.json data/MoIA/T2.json
 
 Entries without an "id" (the conversation-format seed) are matched to training
 ids by description and reference molecule.

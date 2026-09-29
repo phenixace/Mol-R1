@@ -121,7 +121,7 @@ def merge_previous(prev_entries, prev_ids, harvested):
 def parse_args():
     p = argparse.ArgumentParser(description="Mol-R1 reasoning self-improvement loop")
     p.add_argument("--base_model", default="meta-llama/Llama-3.1-8B-Instruct")
-    p.add_argument("--seed_data", default="data/MoIA/T0_zh.json", help="R^0 trace set")
+    p.add_argument("--seed_data", default="data/MoIA/T0.json", help="R^0 trace set")
     p.add_argument("--train_data", default="data/raw/chebi-20/train.txt")
     p.add_argument("--work_dir", default="outputs/rsi")
     p.add_argument("--seed", type=int, default=0)

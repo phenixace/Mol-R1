@@ -21,7 +21,7 @@ GT_PROMPT = (
     "Based on the description, generate the SMILES of the molecule.\n"
     "Description: {question}\n\n[START_I_SMILES]"
 )
-# Suffix appended to questions in the conversation-format seed file (T0_zh.json).
+# Suffix appended to questions in the conversation-format seed files (T0.json, T0_zh.json).
 CONV_SUFFIX = " Please help me generate a molecule SMILES based on the above description."
 
 STRIP_TOKENS = ["<|im_end|>", "<|endoftext|>", "<|eot_id|>", "</s>", "[END_I_SMILES]"]
