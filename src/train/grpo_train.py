@@ -1,11 +1,15 @@
-"""RPO (Reinforced Policy Optimization) training for molecular SMILES generation.
+"""Explore operator: GRPO on top of the SFT policy.
 
-Builds on an SFT-trained model, using exact-match and validity rewards.
+Prompts come from the raw training split (TSV) or a trace set (JSON). The reward
+is exact match: InChI identity with the reference, the same verifier used by the
+harvest step and evaluation. A SMILES-validity reward can be added with
+--validity_weight (off by default).
 """
 
-import json
 import os
-import re
+import sys
+from pathlib import Path
+
 import torch
 
 import transformers.modeling_utils as _mu
@@ -24,63 +28,27 @@ from datasets import Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from trl import GRPOTrainer, GRPOConfig
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from src.common import GEN_PROMPT, extract_answer, is_valid_smiles, load_items, same_molecule
+
 _orig_get_train_sampler = GRPOTrainer._get_train_sampler
 def _patched_get_train_sampler(self, dataset=None):
     return _orig_get_train_sampler(self)
 GRPOTrainer._get_train_sampler = _patched_get_train_sampler
 
-COT_PROMPT = (
-    "Based on the description, generate the SMILES of the molecule with reasoning.\n"
-    "Description: {question}\n\n<think>"
-)
-CONV_SUFFIX = " Please help me generate a molecule SMILES based on the above description."
-
-
-def extract_smiles(text):
-    match = re.search(r"<answer>\s*(.*?)\s*</answer>", text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    match = re.search(r"</think>\s*(.*)", text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return text.strip().split("\n")[-1].strip()
-
-
 def exact_match_reward(prompts, completions, gt, **kwargs):
-    rewards = []
-    for completion, ground_truth in zip(completions, gt):
-        pred = extract_smiles(completion)
-        rewards.append(1.0 if pred.strip() == ground_truth.strip() else 0.0)
-    return rewards
+    return [1.0 if same_molecule(extract_answer(c), g) else 0.0 for c, g in zip(completions, gt)]
 
 
 def validity_reward(prompts, completions, **kwargs):
-    from rdkit import Chem
-    rewards = []
-    for completion in completions:
-        pred = extract_smiles(completion)
-        mol = Chem.MolFromSmiles(pred.strip())
-        rewards.append(0.5 if mol is not None else 0.0)
-    return rewards
-
-
-def parse_entry(d):
-    if "question" in d:
-        return d["question"], d.get("gt", "")
-    convs = d["conversations"]
-    question = convs[0]["value"]
-    if question.endswith(CONV_SUFFIX):
-        question = question[: -len(CONV_SUFFIX)]
-    gpt_text = convs[1]["value"]
-    m = re.search(r"<answer>\s*(.*?)\s*</answer>", gpt_text, re.DOTALL)
-    gt = m.group(1).strip() if m else ""
-    return question, gt
+    return [0.5 if is_valid_smiles(extract_answer(c)) else 0.0 for c in completions]
 
 
 def main():
     parser = ArgumentParser()
     parser.add_argument("--sft_model_dir", type=str, required=True)
-    parser.add_argument("--data_path", type=str, required=True)
+    parser.add_argument("--data_path", type=str, required=True,
+                        help="Raw training split (TSV) or trace set (JSON)")
     parser.add_argument("--output_dir", type=str, default="grpo_output")
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-6)
@@ -91,15 +59,14 @@ def main():
     parser.add_argument("--global_batch_size", type=int, default=128)
     parser.add_argument("--rollout_batch_size", type=int, default=512)
     parser.add_argument("--micro_batch_size", type=int, default=4)
+    parser.add_argument("--em_weight", type=float, default=1.0)
+    parser.add_argument("--validity_weight", type=float, default=0.0)
     args = parser.parse_args()
 
-    with open(args.data_path, "r", encoding="utf-8") as f:
-        raw_data = json.load(f)
-
-    parsed = [parse_entry(d) for d in raw_data]
+    items = load_items(args.data_path)
     dataset = Dataset.from_dict({
-        "prompt": [COT_PROMPT.format(question=q) for q, gt in parsed],
-        "gt": [gt for q, gt in parsed],
+        "prompt": [GEN_PROMPT.format(question=it["question"]) for it in items],
+        "gt": [it["gt"] for it in items],
     })
 
     tokenizer = AutoTokenizer.from_pretrained(args.sft_model_dir)
@@ -112,11 +79,15 @@ def main():
             tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
 
+    rewards = [(f, w) for f, w in ((exact_match_reward, args.em_weight),
+                                   (validity_reward, args.validity_weight)) if w > 0]
+
     training_args = GRPOConfig(
         output_dir=args.output_dir,
         num_train_epochs=args.epochs,
         per_device_train_batch_size=args.micro_batch_size,
-        gradient_accumulation_steps=max(1, args.global_batch_size // (args.micro_batch_size * 8)),
+        gradient_accumulation_steps=max(
+            1, args.global_batch_size // (args.micro_batch_size * int(os.environ.get("WORLD_SIZE", 1)))),
         learning_rate=args.lr,
         weight_decay=0.01,
         warmup_ratio=0.1,
@@ -131,7 +102,7 @@ def main():
         max_completion_length=args.max_completion_length,
         max_prompt_length=512,
         beta=args.beta,
-        reward_weights=[1.0, 0.5],
+        reward_weights=[w for _, w in rewards],
     )
 
     model = AutoModelForCausalLM.from_pretrained(
@@ -142,7 +113,7 @@ def main():
 
     trainer = GRPOTrainer(
         model=model,
-        reward_funcs=[exact_match_reward, validity_reward],
+        reward_funcs=[f for f, _ in rewards],
         args=training_args,
         train_dataset=dataset,
         processing_class=tokenizer,

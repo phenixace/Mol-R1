@@ -1,19 +1,16 @@
 #!/bin/bash
 # Single-iteration pipeline: SFT → Predict → Evaluate
 # Usage: bash scripts/run_sft_eval.sh [DATA_NAME] [MODEL] [NUM_GPUS]
-#   DATA_NAME: PRID-4o | PRID-G | RS-G | MoIA-T0 | MoIA-T1 | MoIA-T2
+#   DATA_NAME: MoIA-T0 | MoIA-T1 | MoIA-T2 | path to a trace-set JSON
 
 set -e
 
-DATA_NAME=${1:-"RS-G"}
+DATA_NAME=${1:-"MoIA-T0"}
 MODEL=${2:-"facebook/galactica-125m"}
 NUM_GPUS=${3:-2}
 
 case $DATA_NAME in
-    "PRID-4o")  DATA_PATH="data/PRID-4o/prid_4o_train.json" ;;
-    "PRID-G")   DATA_PATH="data/PRID-G/prid_g_train.json" ;;
-    "RS-G")     DATA_PATH="data/RS-G/rs_g_train.json" ;;
-    "MoIA-T0")  DATA_PATH="data/MoIA/T0.json" ;;
+    "MoIA-T0")  DATA_PATH="data/MoIA/T0_zh.json" ;;
     "MoIA-T1")  DATA_PATH="data/MoIA/T1.json" ;;
     "MoIA-T2")  DATA_PATH="data/MoIA/T2.json" ;;
     *)          DATA_PATH=$DATA_NAME ;;

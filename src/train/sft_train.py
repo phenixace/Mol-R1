@@ -8,7 +8,9 @@ Supports two modes:
 import argparse
 import json
 import os
-import re
+import sys
+from pathlib import Path
+
 import torch
 
 # DTensor compatibility patch for older PyTorch versions
@@ -27,32 +29,10 @@ from datasets import Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from trl import SFTTrainer, SFTConfig, DataCollatorForCompletionOnlyLM
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from src.common import COT_PREFIX as COT_PROMPT, GT_PROMPT, parse_entry
+
 DEFAULT_MODEL_NAME = "facebook/galactica-125m"
-
-COT_PROMPT = (
-    "Based on the description, generate the SMILES of the molecule with reasoning.\n"
-    "Description: {question}\n\n"
-)
-GT_PROMPT = (
-    "Based on the description, generate the SMILES of the molecule.\n"
-    "Description: {question}\n\n[START_I_SMILES]"
-)
-
-CONV_SUFFIX = " Please help me generate a molecule SMILES based on the above description."
-
-
-def parse_entry(d):
-    """Parse a data entry from either conversations or flat format."""
-    if "question" in d:
-        return d["question"], d.get("gt", ""), d.get("content", "")
-    convs = d["conversations"]
-    question = convs[0]["value"]
-    if question.endswith(CONV_SUFFIX):
-        question = question[: -len(CONV_SUFFIX)]
-    gpt_text = convs[1]["value"]
-    m = re.search(r"<answer>\s*(.*?)\s*</answer>", gpt_text, re.DOTALL)
-    gt = m.group(1).strip() if m else ""
-    return question, gt, gpt_text
 
 
 def main():

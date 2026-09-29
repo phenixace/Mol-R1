@@ -1,7 +1,11 @@
 """Evaluate SMILES predictions against ground truth using standard molecular translation metrics."""
 
-import sys
+import argparse
 import csv
+import json
+import sys
+from pathlib import Path
+
 import numpy as np
 from Levenshtein import distance as lev
 from nltk.translate.bleu_score import corpus_bleu
@@ -9,16 +13,10 @@ from rdkit import Chem
 from rdkit.Chem import MACCSkeys, AllChem
 from rdkit import DataStructs, RDLogger
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from src.common import clean_smiles, same_molecule
+
 RDLogger.DisableLog('rdApp.*')
-
-
-STRIP_TOKENS = ["<|im_end|>", "<|endoftext|>", "</s>", "[END_I_SMILES]"]
-
-
-def clean_smiles(s):
-    for tok in STRIP_TOKENS:
-        s = s.replace(tok, "")
-    return s.strip()
 
 
 def load_predictions(path):
@@ -54,9 +52,9 @@ def evaluate(gts, preds, morgan_r=2):
         try:
             m_gt = Chem.MolFromSmiles(gt)
             m_pred = Chem.MolFromSmiles(pred)
-            if m_pred is None:
-                raise ValueError("Invalid prediction SMILES")
-            if Chem.MolToInchi(m_pred) == Chem.MolToInchi(m_gt):
+            if m_pred is None or m_gt is None:
+                raise ValueError("Invalid SMILES")
+            if same_molecule(pred, gt):
                 exact += 1
             valid_gt_mols.append(m_gt)
             valid_pred_mols.append(m_pred)
@@ -99,12 +97,18 @@ def evaluate(gts, preds, morgan_r=2):
 
 
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else "predictions_gt.txt"
-    print(f"Evaluating: {path}")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("path", nargs="?", default="predictions_gt.txt")
+    parser.add_argument("--json_out", default=None, help="Also write metrics as JSON")
+    args = parser.parse_args()
+    print(f"Evaluating: {args.path}")
     print("=" * 50)
 
-    cids, gts, preds = load_predictions(path)
+    cids, gts, preds = load_predictions(args.path)
     results = evaluate(gts, preds)
+    if args.json_out:
+        with open(args.json_out, "w") as f:
+            json.dump({k: float(v) for k, v in results.items()}, f, indent=2)
 
     for k, v in results.items():
         if isinstance(v, float):

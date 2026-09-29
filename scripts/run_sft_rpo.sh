@@ -1,19 +1,17 @@
 #!/bin/bash
-# Full pipeline: SFT → RPO → Predict → Evaluate
-# Usage: bash scripts/run_sft_rpo.sh [DATA_NAME] [MODEL] [NUM_GPUS]
+# One loop iteration without harvest: SFT on a trace set → RPO on the training set → Predict → Evaluate
+# Usage: bash scripts/run_sft_rpo.sh [DATA_NAME] [MODEL] [NUM_GPUS] [RPO_GPUS]
+#   DATA_NAME: MoIA-T0 | MoIA-T1 | MoIA-T2 | path to a trace-set JSON
 
 set -e
 
-DATA_NAME=${1:-"RS-G"}
+DATA_NAME=${1:-"MoIA-T0"}
 MODEL=${2:-"facebook/galactica-125m"}
 NUM_GPUS=${3:-2}
 RPO_GPUS=${4:-8}
 
 case $DATA_NAME in
-    "PRID-4o")  DATA_PATH="data/PRID-4o/prid_4o_train.json" ;;
-    "PRID-G")   DATA_PATH="data/PRID-G/prid_g_train.json" ;;
-    "RS-G")     DATA_PATH="data/RS-G/rs_g_train.json" ;;
-    "MoIA-T0")  DATA_PATH="data/MoIA/T0.json" ;;
+    "MoIA-T0")  DATA_PATH="data/MoIA/T0_zh.json" ;;
     "MoIA-T1")  DATA_PATH="data/MoIA/T1.json" ;;
     "MoIA-T2")  DATA_PATH="data/MoIA/T2.json" ;;
     *)          DATA_PATH=$DATA_NAME ;;
@@ -42,10 +40,10 @@ torchrun --nproc_per_node=$NUM_GPUS src/train/sft_train.py \
     --grad_accum 4 \
     --max_seq_len 2048
 
-# Step 2: RPO
+# Step 2: RPO on the full training set (as in the loop)
 torchrun --nproc_per_node=$RPO_GPUS src/train/grpo_train.py \
     --sft_model_dir $SFT_DIR/final \
-    --data_path $DATA_PATH \
+    --data_path data/raw/chebi-20/train.txt \
     --output_dir $RPO_DIR \
     --epochs 2 \
     --lr 1e-6 \

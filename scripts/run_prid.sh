@@ -20,7 +20,7 @@ echo "  Model:   $MODEL"
 echo "  Output:  $OUTPUT"
 echo "============================================"
 
-CMD="python src/distill/prid_distill.py \
+CMD="python src/seed/prid_distill.py \
     --model $MODEL \
     --train_data data/raw/chebi-20/train.txt \
     --output $OUTPUT \
